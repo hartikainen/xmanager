@@ -176,9 +176,8 @@ def _get_image_name(py_executable: xm.PythonContainer) -> str:
                      "`gcloud config set project PROJECT_NAME`")
   tag = docker_lib.create_tag()
   # TODO(hartikainen): This should be pulled from auth or the executable spec.
-  repository_name = project_name
   # TODO(hartikainen): The docker registry url should be pulled from configuration.
-  return f'us-docker.pkg.dev/{project_name}/{repository_name}/{image_name}:{tag}'
+  return f'gcr.io/{project_name}/{image_name}:{tag}'
 
 
 def _get_base_image(py_executable: xm.PythonContainer) -> str:
