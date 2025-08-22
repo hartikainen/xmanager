@@ -124,7 +124,7 @@ def push_docker_image(image: str) -> str:
   repository, tag = docker_utils.parse_repository_tag(image)
   push = docker_client.images.push(repository=repository, tag=tag)
   logging.info(push)
-  if not isinstance(push, str) or '"Digest":' not in push:
+  if not isinstance(push, str) or '"digest":' not in push.lower():
     raise RuntimeError(
         'Expected docker push to return a string with `status: Pushed` and a '
         'Digest. This is probably a temporary issue with '
