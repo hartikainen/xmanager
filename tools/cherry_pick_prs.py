@@ -42,19 +42,20 @@ class Args:
             hash-prefixed, or a PR URL), a local branch (``my-branch``), or a
             local branch with an explicit commit-title override
             (``my-branch:Custom title``).
-        base: Ref each source is diffed against to find its own commits.
         repo: ``owner/name`` GitHub repository used for PR lookups.
         remote: Git remote used to fetch PR heads.
         dry_run: Build and verify the stack on a temp branch but do not move
             ``to_branch``.
+        force: Allow moving ``to_branch`` even when the move would not be a
+            fast-forward (i.e. would drop commits already on ``to_branch``).
     """
 
     to_branch: str
     sources: list[str] = dataclasses.field(default_factory=list)
-    base: str = "origin/main"
     repo: str = "google-deepmind/xmanager"
     remote: str = "origin"
     dry_run: bool = False
+    force: bool = False
 
 
 class CherryPickError(RuntimeError):
@@ -229,17 +230,17 @@ def is_ancestor(maybe_ancestor: str, descendant: str) -> bool:
     )
 
 
-def effective_base(head: str, global_base: str, prior_heads: Sequence[str]) -> str:
-    """Returns the commit a source's own changes should be diffed against.
+def effective_base(head: str, prior_heads: Sequence[str]) -> str:
+    """Returns the commit a source's own changes should be cherry-picked from.
 
-    This makes stacked PRs work: a source that is built on top of an
-    already-stacked source contributes only its own incremental changes rather
-    than re-applying its dependency's commits. The base is the descendant-most
-    commit among the global fork point and any previously-stacked heads that are
-    ancestors of ``head`` (so the ``base..head`` cherry-pick range is valid and
-    excludes everything already on the stack).
+    This makes stacked PRs work: a source built on top of an already-stacked
+    source contributes only its own incremental commits rather than re-applying
+    its dependency's commits (which would conflict when the dependency further
+    modified the same files). The base is the descendant-most commit among the
+    source's fork point (its merge base with the current stack) and any
+    previously-stacked heads that are ancestors of ``head``.
     """
-    fork_point = run_git("merge-base", head, global_base).stdout.strip()
+    fork_point = run_git("merge-base", head, "HEAD").stdout.strip()
     candidates = [fork_point]
     candidates.extend(h for h in prior_heads if is_ancestor(h, head))
 
@@ -262,26 +263,43 @@ def commit_files(sha: str) -> list[str]:
     return [line for line in result.stdout.splitlines() if line]
 
 
-def range_is_empty(base_point: str, head: str) -> bool:
-    """Returns whether ``base_point..head`` contains no commits."""
-    result = run_git("rev-list", "--count", f"{base_point}..{head}")
-    return result.stdout.strip() == "0"
+def staged_is_empty() -> bool:
+    """Returns whether the index has no staged changes relative to HEAD."""
+    return run_git("diff", "--cached", "--quiet", check=False).returncode == 0
+
+
+def already_stacked(message: str, head: str) -> bool:
+    """Returns whether a squash commit for this source is already on HEAD.
+
+    The tool names every squash commit deterministically (``Title (#N)``), so a
+    matching subject among the commits added since the source's fork point means
+    the source has already been stacked. This is more robust than re-merging the
+    content, which can spuriously conflict when a *later* source modified the
+    same files on top of this one.
+    """
+    merge_base = run_git("merge-base", "HEAD", head).stdout.strip()
+    subjects = run_git("log", "--format=%s", f"{merge_base}..HEAD").stdout.splitlines()
+    return message in subjects
 
 
 def stack_source(source: Source, base_point: str) -> StackedCommit | None:
-    """Squashes ``source`` into one commit on top of the current HEAD.
+    """Squashes ``source`` into a single commit on top of the current HEAD.
 
-    Applies every commit unique to the source (``base_point..head``) without
-    committing, then records them as a single commit. A cherry-pick conflict is
-    surfaced as a :class:`CherryPickError` after aborting the cherry-pick.
-    Returns ``None`` (and logs a warning) when the source has no commits of its
-    own relative to the stack, e.g. it is fully contained in an earlier source.
+    Idempotency comes first from the squash commit subject (``Title (#N)``): if
+    one is already present on the target the source is skipped, which is robust
+    even when a later source modified the same files on top of this one.
+    Otherwise the source's own commits (``base_point..head``) are cherry-picked
+    without committing and recorded as one squash commit. ``base_point`` is the
+    source's :func:`effective_base`, so a source stacked on another contributes
+    only its incremental changes.
+
+    A cherry-pick conflict means the source is not disjoint from what is already
+    on the stack and is surfaced as a :class:`CherryPickError`. Returns ``None``
+    (and logs a warning) when there is nothing new to commit.
     """
-    if range_is_empty(base_point, source.head):
+    if already_stacked(source.message, source.head):
         logging.warning(
-            "skipping %s: no commits unique to it relative to the stack "
-            "(already contained in an earlier source)",
-            source.spec,
+            "skipping %s: already stacked as %r", source.spec, source.message
         )
         return None
 
@@ -299,13 +317,21 @@ def stack_source(source: Source, base_point: str) -> StackedCommit | None:
     if cherry_pick.returncode != 0:
         files = conflicting_files()
         run_git("cherry-pick", "--abort", check=False)
-        # Clean up any partially staged state from a --no-commit conflict.
         run_git("reset", "--hard", "HEAD", check=False)
         conflict_list = "\n  ".join(files) if files else "(see git output)"
         raise CherryPickError(
             f"source {source.spec!r} is not disjoint; cherry-pick conflicted "
             f"on:\n  {conflict_list}\n{cherry_pick.stderr.strip()}"
         )
+
+    if staged_is_empty():
+        # Changes already present on the target; skip so re-runs are idempotent.
+        run_git("reset", "--hard", "HEAD", check=False)
+        run_git("cherry-pick", "--quit", check=False)
+        logging.warning(
+            "skipping %s: changes already present on the target", source.spec
+        )
+        return None
 
     run_git("commit", "--no-verify", "-m", source.message)
     sha = run_git("rev-parse", "HEAD").stdout.strip()
@@ -368,17 +394,28 @@ def overlap_warnings(commits: Sequence[StackedCommit]) -> list[str]:
 
 def report(
     commits: Sequence[StackedCommit],
+    skipped: Sequence[str],
     to_branch: str,
     final_sha: str,
     original_sha: str,
     dry_run: bool,
+    moved: bool,
 ) -> None:
     """Prints a human-readable summary of the stacking result."""
     print("\nCherry-pick / stack result")
     print("=" * 72)
-    for commit in commits:
-        print(f"  {commit.sha[:9]}  {commit.source.message}")
+    if commits:
+        for commit in commits:
+            print(f"  {commit.sha[:9]}  {commit.source.message}")
+    else:
+        print("  (no new commits)")
     print("-" * 72)
+
+    if skipped:
+        print("Skipped (already present / no unique changes):")
+        for spec in skipped:
+            print(f"  - {spec}")
+        print("-" * 72)
 
     warnings = overlap_warnings(commits)
     if warnings:
@@ -387,16 +424,16 @@ def report(
             print(f"  - {warning}")
         print("-" * 72)
 
-    if dry_run:
+    counts = f"{len(commits)} stacked, {len(skipped)} skipped"
+    if final_sha == original_sha:
+        print(f"{to_branch}: already up to date at {original_sha[:9]} ({counts}).")
+    elif dry_run:
         print(
             f"DRY RUN: {to_branch} left at {original_sha[:9]}; "
-            f"verified stack head is {final_sha[:9]}."
+            f"verified stack head is {final_sha[:9]} ({counts})."
         )
-    else:
-        print(
-            f"{to_branch}: {original_sha[:9]} -> {final_sha[:9]} "
-            f"({len(commits)} commit(s) stacked)."
-        )
+    elif moved:
+        print(f"{to_branch}: {original_sha[:9]} -> {final_sha[:9]} ({counts}).")
     print("=" * 72)
 
 
@@ -422,6 +459,7 @@ def cherry_pick_prs(args: Args) -> None:
 
     try:
         commits = []
+        skipped: list[str] = []
         prior_heads: list[str] = []
         for source in sources:
             if any(is_ancestor(source.head, prior) for prior in prior_heads):
@@ -429,17 +467,33 @@ def cherry_pick_prs(args: Args) -> None:
                     "skipping %s: already fully contained in an earlier source",
                     source.spec,
                 )
+                skipped.append(source.spec)
                 prior_heads.append(source.head)
                 continue
-            base_point = effective_base(source.head, args.base, prior_heads)
+            base_point = effective_base(source.head, prior_heads)
             stacked = stack_source(source, base_point)
             if stacked is not None:
                 commits.append(stacked)
+            else:
+                skipped.append(source.spec)
             prior_heads.append(source.head)
         final_sha = run_git("rev-parse", "HEAD").stdout.strip()
 
-        if not args.dry_run:
+        moved = False
+        if final_sha == original_sha:
+            logging.info("%s is already up to date", args.to_branch)
+        elif not args.dry_run:
+            # The stack is always built on top of to_branch, so moving it is
+            # normally a fast-forward. Guard the rare non-fast-forward case (it
+            # would drop commits) behind --force.
+            if not is_ancestor(original_sha, final_sha) and not args.force:
+                raise CherryPickError(
+                    f"refusing to move {args.to_branch!r}: result "
+                    f"{final_sha[:9]} is not a fast-forward of its current "
+                    f"commit {original_sha[:9]}; pass --force to override"
+                )
             run_git("branch", "-f", args.to_branch, final_sha)
+            moved = True
             logging.info(
                 "moved %s from %s to %s",
                 args.to_branch,
@@ -451,7 +505,9 @@ def cherry_pick_prs(args: Args) -> None:
         run_git("checkout", starting_branch or original_sha, check=False)
         run_git("branch", "-D", temp_branch, check=False)
 
-    report(commits, args.to_branch, final_sha, original_sha, args.dry_run)
+    report(
+        commits, skipped, args.to_branch, final_sha, original_sha, args.dry_run, moved
+    )
 
 
 def main(args: Args) -> None:
