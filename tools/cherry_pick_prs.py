@@ -219,9 +219,35 @@ def resolve_source(spec: str, repo: str, remote: str) -> Source:
     return resolve_branch(spec)
 
 
-def source_base(head: str, base: str) -> str:
-    """Returns the fork point of ``head`` relative to ``base``."""
-    return run_git("merge-base", head, base).stdout.strip()
+def is_ancestor(maybe_ancestor: str, descendant: str) -> bool:
+    """Returns whether ``maybe_ancestor`` is an ancestor of ``descendant``."""
+    return (
+        run_git(
+            "merge-base", "--is-ancestor", maybe_ancestor, descendant, check=False
+        ).returncode
+        == 0
+    )
+
+
+def effective_base(head: str, global_base: str, prior_heads: Sequence[str]) -> str:
+    """Returns the commit a source's own changes should be diffed against.
+
+    This makes stacked PRs work: a source that is built on top of an
+    already-stacked source contributes only its own incremental changes rather
+    than re-applying its dependency's commits. The base is the descendant-most
+    commit among the global fork point and any previously-stacked heads that are
+    ancestors of ``head`` (so the ``base..head`` cherry-pick range is valid and
+    excludes everything already on the stack).
+    """
+    fork_point = run_git("merge-base", head, global_base).stdout.strip()
+    candidates = [fork_point]
+    candidates.extend(h for h in prior_heads if is_ancestor(h, head))
+
+    best = candidates[0]
+    for candidate in candidates[1:]:
+        if is_ancestor(best, candidate):
+            best = candidate
+    return best
 
 
 def conflicting_files() -> list[str]:
@@ -236,24 +262,39 @@ def commit_files(sha: str) -> list[str]:
     return [line for line in result.stdout.splitlines() if line]
 
 
-def stack_source(source: Source, base_ref: str) -> StackedCommit:
+def range_is_empty(base_point: str, head: str) -> bool:
+    """Returns whether ``base_point..head`` contains no commits."""
+    result = run_git("rev-list", "--count", f"{base_point}..{head}")
+    return result.stdout.strip() == "0"
+
+
+def stack_source(source: Source, base_point: str) -> StackedCommit | None:
     """Squashes ``source`` into one commit on top of the current HEAD.
 
-    Applies every commit unique to the source (``base_ref..head``) without
+    Applies every commit unique to the source (``base_point..head``) without
     committing, then records them as a single commit. A cherry-pick conflict is
     surfaced as a :class:`CherryPickError` after aborting the cherry-pick.
+    Returns ``None`` (and logs a warning) when the source has no commits of its
+    own relative to the stack, e.g. it is fully contained in an earlier source.
     """
-    fork_point = source_base(source.head, base_ref)
+    if range_is_empty(base_point, source.head):
+        logging.warning(
+            "skipping %s: no commits unique to it relative to the stack "
+            "(already contained in an earlier source)",
+            source.spec,
+        )
+        return None
+
     logging.info(
         "stacking %s (%s..%s) as %r",
         source.spec,
-        fork_point[:9],
+        base_point[:9],
         source.head[:9],
         source.message,
     )
 
     cherry_pick = run_git(
-        "cherry-pick", "--no-commit", f"{fork_point}..{source.head}", check=False
+        "cherry-pick", "--no-commit", f"{base_point}..{source.head}", check=False
     )
     if cherry_pick.returncode != 0:
         files = conflicting_files()
@@ -380,7 +421,21 @@ def cherry_pick_prs(args: Args) -> None:
     run_git("checkout", "-b", temp_branch, args.to_branch)
 
     try:
-        commits = [stack_source(source, args.base) for source in sources]
+        commits = []
+        prior_heads: list[str] = []
+        for source in sources:
+            if any(is_ancestor(source.head, prior) for prior in prior_heads):
+                logging.warning(
+                    "skipping %s: already fully contained in an earlier source",
+                    source.spec,
+                )
+                prior_heads.append(source.head)
+                continue
+            base_point = effective_base(source.head, args.base, prior_heads)
+            stacked = stack_source(source, base_point)
+            if stacked is not None:
+                commits.append(stacked)
+            prior_heads.append(source.head)
         final_sha = run_git("rev-parse", "HEAD").stdout.strip()
 
         if not args.dry_run:
