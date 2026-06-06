@@ -50,6 +50,12 @@ setup(
         'sqlparse',
         'termcolor',
     ],
+    extras_require={
+        # Dependencies for repository tooling under tools/ (not runtime deps).
+        'dev': [
+            'simple_parsing',
+        ],
+    },
     entry_points={
         'console_scripts': [
             'xmanager = xmanager.cli.cli:entrypoint',
