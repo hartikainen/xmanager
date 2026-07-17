@@ -14,6 +14,7 @@ _Fn = Callable[[xm.Experiment], Awaitable[None]]
 _AsyncFn = Callable[[], xm.JobGeneratorType]
 # The type of `parameter_controller.controller()`
 _Controller = Callable[[_Fn], _AsyncFn]
+_OnJobFinished = Callable[[str, bool, Exception | None], None]
 
 
 class _UnlaunchedJobError(Exception):
@@ -39,6 +40,7 @@ def executable_graph(
     # `flow.controller` and `flow.executable_graph(controller=)`
     controller: Optional[_Controller] = None,
     terminate_on_failure: bool = True,
+    on_job_finished: _OnJobFinished | None = None,
 ) -> xm.JobGeneratorType:
   """Returns an executable which run the pipeline.
 
@@ -73,6 +75,8 @@ def executable_graph(
       executor parameters. If missing, a default executor is used.
     terminate_on_failure: If true, terminate upon the the first failure. If
       false, continue to launch jobs whose dependencies are successful.
+    on_job_finished: Optional callback called when a job finishes. It takes
+      (job_name, success, error) as arguments.
 
   Returns:
     The controller to pass to `experiment.add()`
@@ -96,6 +100,7 @@ def executable_graph(
   async def run_graphs(experiment: xm.Experiment) -> None:
 
     jobs_launched = {job_name: asyncio.Future() for job_name in jobs}
+    callbacks_called = set()
 
     async def job_finished(job_name: str) -> bool:
       log(f'`Waiting for {job_name}` to be added to `experiment.add`')
@@ -105,11 +110,17 @@ def executable_graph(
         await op.wait_until_complete()  # Wait for the job to complete
       except (xm.ExperimentUnitError, _UnlaunchedJobError) as e:
         log(f'`{job_name}` has failed.')
+        if on_job_finished and job_name not in callbacks_called:
+          callbacks_called.add(job_name)
+          on_job_finished(job_name, False, e)
         if terminate_on_failure:
           raise StopControllerError() from e
         return False
       else:
         log(f'`{job_name}` has finished successfully.')
+        if on_job_finished and job_name not in callbacks_called:
+          callbacks_called.add(job_name)
+          on_job_finished(job_name, True, None)
         return True
 
     async def launch_single_job(job_name: str) -> None:
@@ -142,6 +153,9 @@ def executable_graph(
       await asyncio.gather(
           *(launch_single_job(job_name) for job_name in remaining_jobs)
       )
+      # Wait for all jobs to complete to ensure callbacks are called.
+      if on_job_finished:
+        await asyncio.gather(*(job_finished(job_name) for job_name in jobs))
     except StopControllerError as e:
       log(str(e))
       # This is expected, so exit normally.
