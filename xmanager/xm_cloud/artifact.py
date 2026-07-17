@@ -340,7 +340,7 @@ def _process_artifact_payload(
   field_desc = payload_fields[payload_key]
 
   payload_proto = _build_payload_proto(payload_key, field_desc, title, kwargs)
-  payload = artifact_pb2.ArtifactPayload(**{payload_key: payload_proto})
+  payload = artifact_pb2.ArtifactPayload(**{payload_key: payload_proto})  # pyrefly: ignore[bad-argument-type]
 
   additional_info = _extract_legacy_additional_info(payload_proto, title)
   metadata = _extract_metadata(
@@ -382,7 +382,7 @@ def _map_lifecycle_phase(
             f'Invalid lifecycle_phase: {lifecycle_phase}'
         ) from None
   elif isinstance(lifecycle_phase, int):
-    return lifecycle_phase
+    return lifecycle_phase  # pyrefly: ignore[bad-return]
   elif lifecycle_phase is None:
     # Default to INPUT if not specified
     return artifact_pb2.Artifact.LifecyclePhase.INPUT
@@ -591,10 +591,10 @@ def update_artifact(
     paths.append('payload')
 
     # Also update the deprecated top-level url field if we updated the payload
-    url_proto = url_pb2.Url(url=metadata['url'])
-    if metadata['display_name']:
+    url_proto = url_pb2.Url(url=metadata['url'])  # pyrefly: ignore[unsupported-operation]
+    if metadata['display_name']:  # pyrefly: ignore[unsupported-operation]
       url_proto.display_name = metadata['display_name']
-    if metadata['icon']:
+    if metadata['icon']:  # pyrefly: ignore[unsupported-operation]
       url_proto.icon = metadata['icon']
     update_kwargs['url'] = url_proto
     paths.append('url')
