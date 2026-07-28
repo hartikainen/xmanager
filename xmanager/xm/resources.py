@@ -22,7 +22,7 @@ import functools
 import itertools
 import operator
 import re
-from typing import Any, Dict, Iterable, Iterator, Mapping, MutableMapping, Optional, Tuple, Union, cast
+from typing import Any, Dict, Iterable, Iterator, Mapping, MutableMapping, Optional, Tuple, TypeVar, Union, cast
 
 import immutabledict
 
@@ -356,6 +356,9 @@ class Topology:
 
 
 ResourceQuantity = Union[int, float, str, Topology]
+_ResourceTypeOrStr = TypeVar(
+    '_ResourceTypeOrStr', bound=Union[ResourceType, str]
+)
 
 
 def _parse_resource_quantity(
@@ -437,7 +440,7 @@ class JobRequirements:
   def __init__(
       self,
       resources: Mapping[
-          Union[ResourceType, str], ResourceQuantity
+          _ResourceTypeOrStr, ResourceQuantity
       ] = immutabledict.immutabledict(),
       *,
       architecture: Optional[Architecture] = None,
@@ -603,7 +606,7 @@ class JobRequirements:
     else:
       kwargs['replicas'] = self.replicas
 
-    return JobRequirements(merged_resources, **kwargs)  # pyrefly: ignore[bad-argument-type]
+    return JobRequirements(merged_resources, **kwargs)
 
   def __eq__(self, other: 'JobRequirements') -> bool:  # pyrefly: ignore[bad-override]
     if not isinstance(other, JobRequirements):
