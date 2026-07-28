@@ -76,7 +76,8 @@ def executable_graph(
     terminate_on_failure: If true, terminate upon the the first failure. If
       false, continue to launch jobs whose dependencies are successful.
     on_job_finished: Optional callback called when a job finishes. It takes
-      (job_name, success, error) as arguments.
+      (job_name, success, error) as arguments. Should be idempotent as state is
+      not persisted across controller pre-emptions.
 
   Returns:
     The controller to pass to `experiment.add()`
