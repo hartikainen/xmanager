@@ -16,6 +16,7 @@ from xmanager import xm
 from xmanager.xm import async_packager
 from xmanager.xm import id_predictor as xm_id_predictor
 from xmanager.xm_cloud import artifact
+from xmanager.xm_cloud import dashboard
 from xmanager.xm_cloud import executor as xm_cloud_executor
 from xmanager.xm_cloud import snapshot_code
 from xmanager.xm_cloud.packaging import router as packaging_router
@@ -432,6 +433,48 @@ class XManagerCloudExperiment(xm.Experiment):
         strongly_consistent=strongly_consistent,
         page_size=page_size,
         page_token=page_token,
+    )
+
+  # Methods related to dashboards.
+  def create_dashboard(
+      self,
+      title: str,
+      charts: Sequence[dashboard.Chart | Any] | None = None,
+      **kwargs: Any,
+  ) -> dashboard.Dashboard:
+    """Creates a standalone dashboard referencing this experiment.
+
+    If charts is not specified, a default chart referencing this experiment (id)
+    with a default plot will be created automatically.
+
+    Args:
+      title: Display title of the dashboard.
+      charts: Optional sequence of charts. Each chart references an experiment.
+      **kwargs: Additional dashboard properties.
+
+    Returns:
+      The created Dashboard wrapper instance.
+    """
+    if not charts:
+      default_plot = dashboard.create_plot(
+          title=f'Experiment {self.id} Main Metric'
+      )
+      default_chart = dashboard.create_chart(
+          title=f'Experiment {self.id} Chart',
+          experiment_id=self.id,
+          plots=[default_plot],
+      )
+      charts = [default_chart]
+    return dashboard.create_dashboard(
+        title=title,
+        charts=charts,
+        **kwargs,
+    )
+
+  def list_dashboards(self) -> Sequence[dashboard.Dashboard]:
+    """Lists standalone dashboards that contain a chart referencing this experiment."""
+    return dashboard.list_dashboards(
+        filter_query=f'charts.experiment_id={self.id}'
     )
 
   # Other utility methods.

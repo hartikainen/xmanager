@@ -1,6 +1,7 @@
 """XManager launch API implementation for XManager on Cloud."""
 
 from xmanager.xm_cloud import artifact
+from xmanager.xm_cloud import dashboard
 from xmanager.xm_cloud import executor
 from xmanager.xm_cloud import experiment
 
@@ -22,6 +23,16 @@ get_experiment = experiment.get_experiment
 get_work_unit = experiment.get_work_unit
 list_experiments = experiment.list_experiments
 delete_artifact = artifact.delete_artifact
+
+# Dashboard classes and methods.
+Dashboard = dashboard.Dashboard
+Chart = dashboard.Chart
+Plot = dashboard.Plot
+create_dashboard = dashboard.create_dashboard
+create_chart = dashboard.create_chart
+create_plot = dashboard.create_plot
+get_dashboard = dashboard.get_dashboard
+list_dashboards = dashboard.list_dashboards
 get_current_experiment = experiment.get_current_experiment
 get_current_work_unit = experiment.get_current_work_unit
 update_artifact = artifact.update_artifact
