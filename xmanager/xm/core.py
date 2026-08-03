@@ -561,7 +561,12 @@ class WorkUnitRole(ExperimentUnitRole):
   Work units contain jobs that are often run as trials as part of an
   experiment's hyper-parameter search. The status of a work unit is used to
   determine the status of the experiment.
+
+  Attributes:
+    tags: Tags associated with the work unit context.
   """
+
+  tags: Sequence[str] = ()
 
 
 class WorkUnitCompletedAwaitable(Coroutine):
