@@ -19,6 +19,7 @@ This module is private and can only be used by the API itself, but not by users.
 
 import abc
 import asyncio
+import concurrent.futures
 import enum
 import functools
 import os
@@ -74,6 +75,14 @@ def trivial_kwargs_joiner(key: str, value: str) -> str:
   return f'{key}={value}'
 
 
+def _is_in_running_loop() -> bool:
+  try:
+    asyncio.get_running_loop()
+    return True
+  except RuntimeError:
+    return False
+
+
 def run_in_asyncio_loop(
     f: Callable[..., Awaitable[ReturnT]],
 ) -> Callable[..., ReturnT]:
@@ -110,8 +119,20 @@ def run_in_asyncio_loop(
 
   @functools.wraps(f)
   def decorated(*args, **kwargs) -> ReturnT:
-    loop = asyncio.new_event_loop()
-    return loop.run_until_complete(f(*args, **kwargs))
+
+    def _run() -> ReturnT:
+      loop = asyncio.new_event_loop()
+      try:
+        return loop.run_until_complete(f(*args, **kwargs))
+      finally:
+        loop.close()
+
+    if _is_in_running_loop():
+      # Nested event loops are not allowed, so run in a new thread.
+      with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(_run).result()
+    else:
+      return _run()
 
   return decorated
 
