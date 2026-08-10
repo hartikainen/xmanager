@@ -74,6 +74,14 @@ def trivial_kwargs_joiner(key: str, value: str) -> str:
   return f'{key}={value}'
 
 
+def _is_in_running_loop() -> bool:
+  try:
+    asyncio.get_running_loop()
+    return True
+  except RuntimeError:
+    return False
+
+
 def run_in_asyncio_loop(
     f: Callable[..., Awaitable[ReturnT]],
 ) -> Callable[..., ReturnT]:
