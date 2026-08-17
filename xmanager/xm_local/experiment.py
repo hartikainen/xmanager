@@ -291,7 +291,7 @@ class LocalExperiment(xm.Experiment):
           self.experiment_id,
           work_unit.work_unit_id,
       )
-      future = asyncio.Future()
+      future = self._event_loop.create_future()
       future.set_result(work_unit)
       return future
 
@@ -307,7 +307,7 @@ class LocalExperiment(xm.Experiment):
           role,
       )
       self._experiment_units.append(auxiliary_unit)
-      future = asyncio.Future()
+      future = self._event_loop.create_future()
       future.set_result(auxiliary_unit)
       return future
 

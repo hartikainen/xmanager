@@ -199,7 +199,7 @@ class MockExperiment(core.Experiment):
       args: Optional[Mapping[str, Any]] = None,
   ) -> Awaitable[core.ExperimentUnit]:
     del identity
-    future = asyncio.Future()
+    future = self._event_loop.create_future()
     future.set_result(self._work_units[0])
     return future
 
