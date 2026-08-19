@@ -12,12 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-licenses(["notice"])
-
-package(
-    default_applicable_licenses = ["//third_party/py/xmanager:license"],
-)
-
 load("@rules_cc//cc:defs.bzl", "cc_binary")
 
 cc_binary(
