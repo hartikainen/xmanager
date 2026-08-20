@@ -308,7 +308,7 @@ class Database:
     """Lists all the experiment ids from local database."""
     query = text('SELECT experiment_id FROM experiment')
     with self.engine.connect() as connection:
-      rows = connection.execute(query).scalars().all()
+      rows = list(connection.execute(query).scalars().all())
     return rows
 
   def get_experiment(self, experiment_id: int) -> ExperimentResult:
