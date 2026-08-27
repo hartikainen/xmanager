@@ -32,11 +32,12 @@ class BuildImageTest(absltest.TestCase):
     entrypoint_commands = build_image._get_entrypoint_commands(project)
     self.assertEndsWith(entrypoint_commands, ' "$@"')
 
-  def test_get_entrypoint_commands_no_dup_plain_suffix(self):
+  def test_get_entrypoint_commands_quotes_plain_suffix(self):
     commands = ['echo "aaa" $@']
     project = self.create_container(xm.CommandList(commands))
     entrypoint_commands = build_image._get_entrypoint_commands(project)
-    self.assertEndsWith(entrypoint_commands, ' $@')
+    self.assertEndsWith(entrypoint_commands, ' "$@"')
+    self.assertNotEndsWith(entrypoint_commands, ' $@ "$@"')
 
   def test_get_entrypoint_commands_no_dup_quoted_suffix(self):
     commands = ['echo "aaa" "$@"']
