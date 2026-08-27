@@ -3,6 +3,7 @@
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import unittest
@@ -68,6 +69,29 @@ class MultiplexerTest(unittest.IsolatedAsyncioTestCase):
     rerun = _run(echoed_command)
     self.assertEqual(
         json.loads(rerun.stdout.splitlines()[0]), _EXPECTED_OUTPUT
+    )
+
+  def test_get_executable_command_expands_job_environment(self):
+    executable = shutil.which('printf')
+    assert executable is not None
+    args = xm.SequentialArgs.from_collection([
+        '%s\\n',
+        utils.ShellSafeArg('$TEST_VALUE'),
+    ]).to_list(utils.ARG_ESCAPER)
+    command = multiplexer._get_executable_command(
+        executable,
+        args,
+        {'TEST_VALUE': 'expanded'},
+    )
+
+    result = _run(command)
+
+    output = result.stdout.splitlines()
+    self.assertEqual(output[0], 'expanded')
+    self.assertEqual(
+        output[-1],
+        'export TEST_VALUE=expanded; '
+        + ' '.join([shlex.quote(executable), *args]),
     )
 
   @mock.patch.object(multiplexer, '_has_tmux', return_value=True)
