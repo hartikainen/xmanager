@@ -39,6 +39,25 @@ class BuildImageTest(absltest.TestCase):
     self.assertEndsWith(entrypoint_commands, ' "$@"')
     self.assertNotEndsWith(entrypoint_commands, ' $@ "$@"')
 
+  def test_get_entrypoint_commands_quotes_unspaced_suffix(self):
+    commands = ['echo "aaa"$@']
+    project = self.create_container(xm.CommandList(commands))
+    entrypoint_commands = build_image._get_entrypoint_commands(project)
+    self.assertEndsWith(entrypoint_commands, 'echo "aaa""$@"')
+
+  def test_get_entrypoint_commands_quotes_suffix_of_an_inner_command(self):
+    commands = [
+        './pre_process.sh',
+        'python3 -m cifar10 $@',
+        './post_process.sh',
+    ]
+    project = self.create_container(xm.CommandList(commands))
+    entrypoint_commands = build_image._get_entrypoint_commands(project)
+    self.assertEqual(
+        entrypoint_commands,
+        './pre_process.sh\npython3 -m cifar10 "$@"\n./post_process.sh',
+    )
+
   def test_get_entrypoint_commands_no_dup_quoted_suffix(self):
     commands = ['echo "aaa" "$@"']
     project = self.create_container(xm.CommandList(commands))
