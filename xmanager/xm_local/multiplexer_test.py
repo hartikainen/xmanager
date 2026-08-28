@@ -12,9 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import os
 import shlex
 import subprocess
+import sys
 import unittest
 from unittest import mock
 
@@ -23,6 +25,15 @@ from absl.testing import absltest
 from xmanager import xm
 from xmanager.xm import utils
 from xmanager.xm_local import multiplexer
+
+
+# `execution.py` merges the whole ambient environment into `env_vars`, so an
+# interactive shell's values reach the multiplexer as they are.
+_METACHARACTER_ENV = {
+    'LS_COLORS': 'di=1;36:ln=35:*.tar=01;31',
+    'FZF_DEFAULT_OPTS': "--height 40%\n--bind '?:toggle-preview'",
+    'LESS_TERMCAP_md': '\x1b[1m\x1b[32m',
+}
 
 
 def _executable_command(script_path: str) -> str:
@@ -97,6 +108,26 @@ class MultiplexerTest(absltest.TestCase, unittest.IsolatedAsyncioTestCase):
         output[-1],
         'export TEST_VALUE=expanded; '
         + ' '.join([shlex.quote(sys.executable), *args]),
+    )
+
+  def test_get_executable_command_quotes_environment_metacharacters(self):
+    script = (
+        'import json, os, sys; '
+        'print(json.dumps({name: os.environ[name] for name in sys.argv[1:]}))'
+    )
+    args = xm.SequentialArgs.from_collection(
+        ['-c', script, *_METACHARACTER_ENV]
+    ).to_list(utils.ARG_ESCAPER)
+    command = multiplexer._get_executable_command(
+        sys.executable,
+        args,
+        _METACHARACTER_ENV,
+    )
+
+    result = _run(command)
+
+    self.assertEqual(
+        json.loads(result.stdout.splitlines()[0]), _METACHARACTER_ENV
     )
 
   @mock.patch.object(multiplexer, '_has_tmux', return_value=True)
