@@ -14,7 +14,6 @@
 
 import os
 import shlex
-import shutil
 import subprocess
 import unittest
 from unittest import mock
@@ -79,14 +78,13 @@ class MultiplexerTest(absltest.TestCase, unittest.IsolatedAsyncioTestCase):
     self.assertEqual(lines[:2], ['{"d": 4}', 'with space'])
 
   def test_get_executable_command_expands_job_environment(self):
-    executable = shutil.which('printf')
-    assert executable is not None
     args = xm.SequentialArgs.from_collection([
-        '%s\\n',
+        '-c',
+        'import sys; print(sys.argv[1])',
         utils.ShellSafeArg('$TEST_VALUE'),
     ]).to_list(utils.ARG_ESCAPER)
     command = multiplexer._get_executable_command(
-        executable,
+        sys.executable,
         args,
         {'TEST_VALUE': 'expanded'},
     )
@@ -98,7 +96,7 @@ class MultiplexerTest(absltest.TestCase, unittest.IsolatedAsyncioTestCase):
     self.assertEqual(
         output[-1],
         'export TEST_VALUE=expanded; '
-        + ' '.join([shlex.quote(executable), *args]),
+        + ' '.join([shlex.quote(sys.executable), *args]),
     )
 
   @mock.patch.object(multiplexer, '_has_tmux', return_value=True)

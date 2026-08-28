@@ -36,7 +36,8 @@ def _get_executable_command(
   ]
   executable_command = ' '.join([shlex.quote(executable_path), *args])
   launch_command = '; '.join([*environment, executable_command])
-  # Preserve quoting so the printed command can be rerun verbatim.
+  # When the command is done, echo the command so it can be copy-pasted, and
+  # then drop into a shell.
   command = (
       f"{launch_command}; echo; echo Job completed.; printf '%s\\n' "
       f'{shlex.quote(launch_command)}; exec $SHELL'
