@@ -10,7 +10,11 @@ Disjointness is decided by git: each source is applied with ``git cherry-pick``
 on top of the accumulating stack, and a cherry-pick conflict is treated as the
 sources not being disjoint, which aborts the whole operation. Everything happens
 on a throwaway temp branch and the target branch is only moved on full success,
-so a failure leaves the repository untouched.
+so a conflict leaves the target branch unchanged.
+
+Use ``--base_branch origin/main --overwrite`` to rebuild an existing target
+from an explicit base. With ``--base_branch``, a missing target is created on
+success. Add ``--dry_run`` to verify the stack without updating the target.
 
 Example:
 
@@ -46,8 +50,10 @@ class Args:
         remote: Git remote used to fetch PR heads.
         dry_run: Build and verify the stack on a temp branch but do not move
             ``to_branch``.
-        force: Allow moving ``to_branch`` even when the move would not be a
-            fast-forward (i.e. would drop commits already on ``to_branch``).
+        base_branch: Commit or ref to start from instead of ``to_branch``.
+        overwrite: Replace an existing target with a stack built from
+            ``base_branch`` (required). Commits unique to the target are dropped.
+        force: Alias for ``overwrite``; requires ``base_branch``.
     """
 
     to_branch: str
@@ -55,7 +61,12 @@ class Args:
     repo: str = "google-deepmind/xmanager"
     remote: str = "origin"
     dry_run: bool = False
-    force: bool = False
+    force: bool = dataclasses.field(
+        default=False,
+        metadata={"help": "Alias for --overwrite; requires --base_branch."},
+    )
+    base_branch: str | None = None
+    overwrite: bool = False
 
 
 class CherryPickError(RuntimeError):
@@ -112,13 +123,18 @@ def _run(
     *args: str, check: bool, cwd: str | None = None
 ) -> subprocess.CompletedProcess[str]:
     logging.debug("running: %s", " ".join(args))
-    result = subprocess.run(
-        args,
-        check=False,
-        cwd=cwd,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            args,
+            check=False,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError as error:
+        raise CherryPickError(
+            f"command {args[0]!r} not found; install it first"
+        ) from error
     if check and result.returncode != 0:
         raise CherryPickError(
             f"command {' '.join(args)!r} failed with code "
@@ -297,6 +313,12 @@ def stack_source(source: Source, base_point: str) -> StackedCommit | None:
     on the stack and is surfaced as a :class:`CherryPickError`. Returns ``None``
     (and logs a warning) when there is nothing new to commit.
     """
+    if is_ancestor(source.head, "HEAD"):
+        logging.warning(
+            "skipping %s: source is already an ancestor of the stack", source.spec
+        )
+        return None
+
     if already_stacked(source.message, source.head):
         logging.warning(
             "skipping %s: already stacked as %r", source.spec, source.message
@@ -333,7 +355,12 @@ def stack_source(source: Source, base_point: str) -> StackedCommit | None:
         )
         return None
 
-    run_git("commit", "--no-verify", "-m", source.message)
+    try:
+        run_git("commit", "--no-verify", "-m", source.message)
+    except CherryPickError:
+        run_git("cherry-pick", "--abort", check=False)
+        run_git("reset", "--hard", "HEAD", check=False)
+        raise
     sha = run_git("rev-parse", "HEAD").stdout.strip()
     return StackedCommit(source=source, sha=sha, files=commit_files(sha))
 
@@ -379,6 +406,19 @@ def current_branch() -> str | None:
     return name or None
 
 
+def ensure_target_available(target_ref: str, starting_branch: str | None) -> None:
+    """Rejects a target checked out in another worktree."""
+    listing = run_git("worktree", "list", "--porcelain", "-z").stdout
+    starting_ref = (
+        f"refs/heads/{starting_branch}" if starting_branch is not None else None
+    )
+    if f"branch {target_ref}" in listing.split("\0") and target_ref != starting_ref:
+        raise CherryPickError(
+            f"target branch {target_ref!r} is checked out in another worktree; "
+            "switch that worktree to another branch first"
+        )
+
+
 def overlap_warnings(commits: Sequence[StackedCommit]) -> list[str]:
     """Returns warnings for files touched by more than one source."""
     seen: dict[str, list[str]] = {}
@@ -397,7 +437,7 @@ def report(
     skipped: Sequence[str],
     to_branch: str,
     final_sha: str,
-    original_sha: str,
+    original_sha: str | None,
     dry_run: bool,
     moved: bool,
 ) -> None:
@@ -428,12 +468,14 @@ def report(
     if final_sha == original_sha:
         print(f"{to_branch}: already up to date at {original_sha[:9]} ({counts}).")
     elif dry_run:
+        target_state = f"left at {original_sha[:9]}" if original_sha else "not created"
         print(
-            f"DRY RUN: {to_branch} left at {original_sha[:9]}; "
+            f"DRY RUN: {to_branch} {target_state}; "
             f"verified stack head is {final_sha[:9]} ({counts})."
         )
     elif moved:
-        print(f"{to_branch}: {original_sha[:9]} -> {final_sha[:9]} ({counts}).")
+        previous = original_sha[:9] if original_sha else "(absent)"
+        print(f"{to_branch}: {previous} -> {final_sha[:9]} ({counts}).")
     print("=" * 72)
 
 
@@ -442,20 +484,69 @@ def cherry_pick_prs(args: Args) -> None:
     if not args.sources:
         raise CherryPickError("no sources provided; pass --sources ...")
 
+    overwrite = args.overwrite or args.force
+    if overwrite and args.base_branch is None:
+        raise CherryPickError(
+            "--overwrite/--force requires --base_branch to specify where the "
+            "replacement stack starts"
+        )
+
     ensure_clean_worktree()
 
-    to_branch_sha = run_git(
-        "rev-parse", "--verify", "--quiet", args.to_branch, check=False
+    if (
+        args.to_branch.startswith("-")
+        or args.to_branch == "HEAD"
+        or run_git(
+            "check-ref-format", f"refs/heads/{args.to_branch}", check=False
+        ).returncode
+        != 0
+    ):
+        raise CherryPickError(f"invalid target branch name {args.to_branch!r}")
+    target_ref = f"refs/heads/{args.to_branch}"
+    to_branch_sha = run_git("rev-parse", "--verify", "--quiet", target_ref, check=False)
+    original_sha = (
+        to_branch_sha.stdout.strip() if to_branch_sha.returncode == 0 else None
     )
-    if to_branch_sha.returncode != 0:
-        raise CherryPickError(f"target branch {args.to_branch!r} not found")
-    original_sha = to_branch_sha.stdout.strip()
-
+    if original_sha is None and args.base_branch is None:
+        raise CherryPickError(
+            f"local target branch {args.to_branch!r} not found; "
+            "pass --base_branch to create it"
+        )
+    if original_sha is not None and args.base_branch is not None and not overwrite:
+        raise CherryPickError(
+            f"target branch {args.to_branch!r} already exists; pass --overwrite "
+            "to replace it from --base_branch, or omit --base_branch to append"
+        )
     starting_branch = current_branch()
+    starting_sha = run_git("rev-parse", "HEAD").stdout.strip()
+    ensure_target_available(target_ref, starting_branch)
+    base_sha = original_sha
+    if args.base_branch is not None:
+        base = run_git(
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "--end-of-options",
+            f"{args.base_branch}^{{commit}}",
+            check=False,
+        )
+        if base.returncode != 0:
+            raise CherryPickError(
+                f"base {args.base_branch!r} does not resolve to a commit"
+            )
+        base_sha = base.stdout.strip()
+    assert base_sha is not None
+    logging.info("building %s from %s", args.to_branch, base_sha[:9])
+    if overwrite and original_sha is not None:
+        logging.warning(
+            "rebuilding %s from %s; commits unique to the target will be dropped",
+            args.to_branch,
+            args.base_branch,
+        )
     sources = [resolve_source(spec, args.repo, args.remote) for spec in args.sources]
 
     temp_branch = unique_temp_branch()
-    run_git("checkout", "-b", temp_branch, args.to_branch)
+    run_git("checkout", "-b", temp_branch, base_sha)
 
     try:
         commits = []
@@ -483,27 +574,39 @@ def cherry_pick_prs(args: Args) -> None:
         if final_sha == original_sha:
             logging.info("%s is already up to date", args.to_branch)
         elif not args.dry_run:
-            # The stack is always built on top of to_branch, so moving it is
-            # normally a fast-forward. Guard the rare non-fast-forward case (it
-            # would drop commits) behind --force.
-            if not is_ancestor(original_sha, final_sha) and not args.force:
+            ensure_target_available(target_ref, None)
+            # The expected value prevents overwriting a concurrent branch update.
+            update = run_git(
+                "update-ref",
+                "-m",
+                "cherry_pick_prs: stack sources",
+                target_ref,
+                final_sha,
+                original_sha or "",
+                check=False,
+            )
+            if update.returncode != 0:
                 raise CherryPickError(
-                    f"refusing to move {args.to_branch!r}: result "
-                    f"{final_sha[:9]} is not a fast-forward of its current "
-                    f"commit {original_sha[:9]}; pass --force to override"
+                    f"could not update target branch {args.to_branch!r}; "
+                    "it may have changed while the stack was being built:\n"
+                    f"{update.stderr.strip()}"
                 )
-            run_git("branch", "-f", args.to_branch, final_sha)
             moved = True
             logging.info(
                 "moved %s from %s to %s",
                 args.to_branch,
-                original_sha[:9],
+                original_sha[:9] if original_sha else "(absent)",
                 final_sha[:9],
             )
     finally:
-        # Return to wherever we started and drop the temp branch.
-        run_git("checkout", starting_branch or original_sha, check=False)
-        run_git("branch", "-D", temp_branch, check=False)
+        restore = run_git("checkout", starting_branch or starting_sha, check=False)
+        if restore.returncode == 0:
+            run_git("branch", "-D", temp_branch, check=False)
+        else:
+            raise CherryPickError(
+                "could not restore the starting checkout; "
+                f"retained {temp_branch!r}: {restore.stderr.strip()}"
+            )
 
     report(
         commits, skipped, args.to_branch, final_sha, original_sha, args.dry_run, moved
