@@ -1,0 +1,17 @@
+{
+  "repository": "https://github.com/Eka-Robotics/xmc",
+  "branch": "eka/main",
+  "tag": "v0.8.0-eka-20260916-0",
+  "commit": "ee6049d3e1a5a35f8cd886dc4bd7874f18503f50",
+  "upstream_repository": "https://github.com/google/xmc",
+  "upstream_commit": "52886e1c0e40c46ac9cbcdd92c93ad1be39e8aa8",
+  "experiment_client": {
+    "repository": "https://github.com/google-deepmind/xmanager",
+    "commit": "7d9803e43bfb057a7e3ca443ed03a4af723046b1",
+    "path": "xmanager_cloud/experiment_state_server"
+  },
+  "generation": {
+    "grpcio-tools": "1.78.0",
+    "googleapis-common-protos": "1.75.3"
+  }
+}

@@ -1,0 +1,440 @@
+// Copyright 2025 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+syntax = "proto3";
+
+package cloud.xmanager.v1;
+
+import "google/api/field_behavior.proto";
+import "google/api/resource.proto";
+import "google/protobuf/timestamp.proto";
+import "xmanager_cloud/experiment_state_server/proto/priority.proto";
+import "xmanager_cloud/experiment_state_server/proto/resources.proto";
+import "xmanager_cloud/experiment_state_server/proto/url.proto";
+import "xmanager_cloud/experiment_state_server/proto/work_unit_execution.proto";
+
+option java_multiple_files = true;
+
+message WorkUnit {
+  option (google.api.resource) = {
+    type: "cloud.xmanager.googleapis.com/WorkUnit"
+    pattern: "experiments/{xid}/workUnits/{wid}"
+    singular: "workUnit"
+    plural: "workUnits"
+  };
+
+  enum WorkUnitType {
+    WORK_UNIT_TYPE_UNSPECIFIED = 0;
+    STANDARD = 1;
+    AUXILIARY = 2;
+  }
+
+  // Resource name of the work unit.
+  string name = 1 [(google.api.field_behavior) = IDENTIFIER];
+  // The type of the work unit.
+  WorkUnitType work_unit_type = 2 [(google.api.field_behavior) = IMMUTABLE];
+  // Priority of the work unit. Higher values indicate higher priority.
+  Priority priority = 3 [(google.api.field_behavior) = REQUIRED];
+  // Time when the work unit was created.
+  google.protobuf.Timestamp create_time = 4
+      [(google.api.field_behavior) = OUTPUT_ONLY];
+  // Time when the work unit was last updated.
+  google.protobuf.Timestamp update_time = 5
+      [(google.api.field_behavior) = OUTPUT_ONLY];
+  // URLs associated with the work unit.
+  repeated Url urls = 6 [(google.api.field_behavior) = OPTIONAL];
+  // The executable to run for the work unit. Cannot be changed after creation.
+  Executable executable = 7 [(google.api.field_behavior) = IMMUTABLE];
+  // Tags associated with the work unit.
+  repeated string tags = 8 [(google.api.field_behavior) = OPTIONAL];
+  // Notes associated with the work unit.
+  string notes = 9 [(google.api.field_behavior) = OPTIONAL];
+  // The current work unit execution.
+  WorkUnitExecution current_work_unit_execution = 10
+      [(google.api.field_behavior) = OUTPUT_ONLY];
+}
+
+message Executable {
+  // The scheduling constraints for the executable.
+  SchedulingConstraints scheduling_constraints = 1
+      [(google.api.field_behavior) = REQUIRED];
+  // The type of executable. This is a oneof to allow for different executable
+  // types to be added in the future.
+  oneof type {
+    JobSetExecutable jobset = 2;
+  }
+}
+
+// A JobSetExecutable is a collection of KubernetesJobs that are run together
+// as a JobSet resource.
+message JobSetExecutable {
+  // Network configuration for the JobSet (`network`).
+  message Network {
+    // Whether to enable DNS hostnames for pods in the JobSet
+    // (`network.enableDNSHostnames`).
+    // When true, the JobSet controller provisions a Headless Service so pods
+    // can discover and communicate with each other using deterministic FQDNs:
+    // <jobset-name>-<replicated-job-name>-<job-index>-<pod-index>.<subdomain>
+    optional bool enable_dns_hostnames = 1;
+
+    // Custom subdomain name for the JobSet Headless Service
+    // (`network.subdomain`).
+    // If omitted and enable_dns_hostnames is true, defaults to the JobSet name.
+    string subdomain = 2;
+
+    // Whether to publish DNS records for pods before they become Ready
+    // (`network.publishNotReadyAddresses`).
+    // Critical for multi-pod/distributed rendezvous (PyTorch DDP, JAX, MPI)
+    // so worker pods can resolve each other during container initialization.
+    optional bool publish_not_ready_addresses = 3;
+  }
+
+  // Policy for determining when the JobSet has succeeded (`success_policy`).
+  message SuccessPolicy {
+    enum Operator {
+      OPERATOR_UNSPECIFIED = 0;
+      // All target replicated jobs must succeed for the JobSet to succeed.
+      ALL = 1;
+      // Any single target replicated job succeeding marks the JobSet as successful.
+      ANY = 2;
+    }
+    // Determines whether ALL or ANY of the target replicated jobs must succeed.
+    // Defaults to ALL when target_replicated_jobs is specified or when unspecified.
+    Operator operator = 1;
+
+    // Names of the KubernetesJobs (replicated jobs) that this policy applies to.
+    // If not set, applies to all jobs in the JobSet unless automatic defaulting triggers.
+    // For example, setting target_replicated_jobs to ["pathways-head"] with Operator ALL
+    // ensures the JobSet succeeds as soon as "pathways-head" succeeds, which signals the
+    // JobSet controller to clean up and terminate any background worker servers.
+    repeated string target_replicated_jobs = 2;
+  }
+
+  // Coordinator configuration for the JobSet (`coordinator`).
+  // Defines which pod can be marked as the coordinator for the JobSet workload,
+  // prompting the JobSet controller to inject stable endpoint annotations (`jobset.sigs.k8s.io/coordinator`).
+  message Coordinator {
+    // Name of the ReplicatedJob which contains the coordinator pod.
+    string replicated_job = 1;
+
+    // Index of the Job which contains the coordinator pod (i.e., for a ReplicatedJob
+    // with N replicas, there are Job indexes 0 to N-1). Defaults to 0 if unset.
+    // Note: For GPU and TPU workloads, multi-replica jobs (Replicas: N) are typically converted
+    // by the execution environment into single-replica multi-pod jobs (Replicas: 1, Parallelism: N).
+    // When this conversion occurs, the actuator automatically maps `job_index` to `0` and
+    // `pod_index` to the original `job_index` (plus any specified `pod_index`).
+    optional int32 job_index = 2;
+
+    // Job completion index of the coordinator pod. Defaults to 0 if unset.
+    optional int32 pod_index = 3;
+  }
+
+  // The Jobs that make up the JobSet.
+  repeated KubernetesJob jobs = 1;
+
+  // Network configuration for the JobSet (DNS hostnames, unready address publishing).
+  Network network = 2;
+
+  // Coordinator configuration for the JobSet.
+  Coordinator coordinator = 3;
+
+  // Success policy for the JobSet. If not specified, defaults to requiring all jobs to succeed,
+  // unless a known leader role like "pathways-head" is detected in jobs.
+  optional SuccessPolicy success_policy = 4;
+
+  // Custom annotations to apply to the top-level JobSet resource.
+  map<string, string> annotations = 6;
+
+  // Custom labels to apply to the top-level JobSet resource.
+  map<string, string> labels = 7;
+}
+
+// A KubernetesJob is a single Kubernetes Job that is run as part of a
+// JobSetExecutable.
+message KubernetesJob {
+  message DependencyOrder {
+    // The name of the Kubernetes Job that this Job depends on. This must be the
+    // name of a KubernetesJob in the same JobSetExecutable.
+    string job_name = 1;
+    // The state that the dependent job must be in for this job to be started.
+    enum JobDependencyState {
+      JOB_DEPENDENCY_STATE_UNSPECIFIED = 0;
+      // The dependent job must be ready to start this job. This is useful for
+      // server-client dependencies where the client job should not start until
+      // the server job is ready.
+      READY = 1;
+      // The dependent job must be completed successfully for this job to be
+      // started.
+      COMPLETED = 2;
+    }
+    JobDependencyState job_dependency_state = 2;
+  }
+
+  // The name of the Kubernetes Job.
+  string name = 1;
+
+  // The spec of the Kubernetes Job.
+  ExecutableSpec spec = 2;
+  // The annotations to apply to the Kubernetes Job.
+  map<string, string> annotations = 3;
+  // The number of replicas to run for the Kubernetes Job.
+  int32 replicas = 4;
+  // The maximum number of times to retry the Kubernetes Job.
+  int32 retry_limit = 5;
+  // The active deadline of the Kubernetes Job. This is the maximum amount of
+  // time the Kubernetes Job can run before it is killed. Note this is not a
+  // deadline per execution, this is a deadline for the entire Kubernetes Job
+  // to be active. If a pod fails and is restarted, the deadline is not reset.
+  int64 active_deadline_seconds = 6;
+  // The dependencies of the Kubernetes Job. This is used to specify the
+  // ordering of jobs within the JobSet. If a job depends upon another job, it
+  // must be specified after the dependent job in the list of jobs.
+  DependencyOrder dependency_order = 7;
+  // The Kubernetes Service Account (KSA) to run the Job as. If not set, the
+  // namespace's default KSA is used.
+  string service_account = 8;
+  // Sidecar / auxiliary containers to run alongside the primary container in each Pod.
+  // Sidecars are implemented as Kubernetes native sidecar containers (init containers with
+  // restartPolicy: Always), meaning they start during pod initialization and are automatically
+  // terminated by Kubernetes when the primary container completes.
+  repeated ExecutableSpec sidecars = 9;
+  // Init containers to run before primary and sidecar containers start.
+  repeated ExecutableSpec init_containers = 10;
+  // Node selector labels to apply to all Pods in this Kubernetes Job.
+  // This allows pinning specific jobs (e.g., head vs worker) to distinct node pools.
+  map<string, string> node_selector = 11;
+
+  // Optional Kubernetes Pod PriorityClass name to assign to the pods created
+  // by this ReplicatedJob (e.g., "very-high"). If omitted, the cluster default
+  // PriorityClass is used.
+  // Note: This only affects Pod-level scheduling and preemption (node-level).
+  // It does not affect Kueue queueing or admission priority, which is managed
+  // separately via Experiment/WorkUnit priorities.
+  string priority_class_name = 12;
+
+  // Custom volumes available to containers in the pod.
+  repeated Volume volumes = 13;
+
+  // Optional flag to request host networking for pods in this job.
+  // Requires backend feature flag to be enabled.
+  optional bool host_network = 14;
+
+  // Optional Kubernetes DNS policy for pods in this job (e.g. "ClusterFirst", "ClusterFirstWithHostNet", "Default").
+  // If host_network is true and dns_policy is unset, defaults to "ClusterFirstWithHostNet".
+  optional string dns_policy = 15;
+
+  // Group name for Kueue podSet grouping. If omitted, Kueue defaults the podSet name to the ReplicatedJob name.
+  string group_name = 16;
+
+  // Custom labels to apply to the Kubernetes Job and Pod templates.
+  // Note: Reserved system labels (e.g. Experiment ID, WorkUnit ID, Queue Name)
+  // take precedence and cannot be overridden.
+  map<string, string> labels = 17;
+
+  // Optional Kubernetes Pod restart policy for pods in this job ("OnFailure", "Never").
+  // Defaults to "Never" if omitted.
+  // Note: "Always" is explicitly forbidden to comply with the XMC Non-Restarting JobSets
+  // contract (in-place pod restarts without coordinator synchronization cause multi-host deadlocks).
+  // See: https://github.com/kubernetes/api/blob/a9c6d6c7c5a6a319844d4bd0631fc3b28de3a407/core/v1/types.go#L3891
+  optional string restart_policy = 18;
+
+  // Optional termination grace period in seconds for pods created by this KubernetesJob.
+  // Controls how long Kubernetes waits for containers to gracefully shut down before forcefully killing them.
+  optional int64 termination_grace_period_seconds = 19;
+
+  // Optional flag to disable the automatic injection of Kubernetes PodFailurePolicy.
+  // When set to true, or when restart_policy is "OnFailure", XMC omits PodFailurePolicy
+  // injection on the JobSpec. This allows standard Kubernetes backoff retries and absorbs
+  // expected non-zero exits (e.g. for worker daemons in multi-component JobSets).
+  optional bool disable_pod_failure_policy = 20;
+}
+
+// Represents a volume that can be mounted by containers in a KubernetesJob.
+message Volume {
+  // Volume name used for referencing in volume mounts.
+  string name = 1;
+
+  // The source of the volume.
+  oneof source {
+    PersistentVolumeClaimVolumeSource persistent_volume_claim = 2;
+    GcsVolumeSource gcs = 3;
+    HostPathVolumeSource host_path = 4;
+    EmptyDirVolumeSource empty_dir = 5;
+    SecretVolumeSource secret = 6;
+    ConfigMapVolumeSource config_map = 7;
+    NfsVolumeSource nfs = 8;
+  }
+}
+
+// PersistentVolumeClaim volume source.
+message PersistentVolumeClaimVolumeSource {
+  // Name of the PersistentVolumeClaim in the same namespace as the pod.
+  string claim_name = 1;
+  // If true, the volume will be mounted as read-only.
+  optional bool read_only = 2;
+}
+
+// GCS volume source backed by GKE GCS FUSE CSI driver (gcs.csi.storage.gke.io).
+message GcsVolumeSource {
+  // The GCS bucket name (e.g., "my-bucket" or "gs://my-bucket").
+  string bucket = 1;
+  // Optional mount options passed to the GCS FUSE CSI driver (e.g., "implicit-dirs", "only-dir=subpath").
+  repeated string mount_options = 2;
+  // If true, the bucket is mounted read-only.
+  optional bool read_only = 3;
+}
+
+// HostPath volume source.
+message HostPathVolumeSource {
+  // Path of the directory or file on the host node.
+  string path = 1;
+  // Type for HostPath (e.g., "DirectoryOrCreate", "Directory", "File").
+  string type = 2;
+}
+
+// EmptyDir volume source.
+message EmptyDirVolumeSource {
+  // Storage medium backing this directory ("" for disk, "Memory" for ram/tmpfs).
+  string medium = 1;
+  // Total size limit required for this EmptyDir volume in bytes.
+  int64 size_limit_bytes = 2;
+}
+
+// Secret volume source.
+message SecretVolumeSource {
+  string secret_name = 1;
+  optional int32 default_mode = 2; // Octal file permission mode (e.g., 0400 = 256)
+  optional bool optional = 3;
+}
+
+// ConfigMap volume source.
+message ConfigMapVolumeSource {
+  string name = 1;
+  optional int32 default_mode = 2;
+  optional bool optional = 3;
+}
+
+// NFS volume source.
+message NfsVolumeSource {
+  string server = 1;
+  string path = 2;
+  optional bool read_only = 3;
+}
+
+// Selects a field of the Pod (matches YAML 'fieldRef').
+message FieldRef {
+  string field_path = 1; // e.g. "status.podIP" or "metadata.name"
+  string api_version = 2; // optional
+}
+
+// Selects a key of a Secret (matches YAML 'secretKeyRef').
+message SecretKeyRef {
+  string name = 1;
+  string key = 2;
+  optional bool optional = 3;
+}
+
+// Represents the source of an environment variable's reference value.
+message EnvVarSource {
+  oneof reference {
+    FieldRef field_ref = 1;
+    SecretKeyRef secret_key_ref = 2;
+    // Add here other env reference cases.
+  }
+}
+
+// Represents a single environment variable definition.
+message EnvVar {
+  // The name of the environment variable (e.g., "POD_IP")
+  string name = 1;
+
+  // The source of the environment variable's value
+  oneof source {
+    // Hardcoded string value
+    string value = 2;
+
+    // Reference to a Pod field
+    EnvVarSource value_from = 3;
+  }
+}
+
+// Represents a volume mount inside a container.
+message VolumeMount {
+  // This must match the name of a Volume in the KubernetesJob, or one of the default
+  // scratch volumes ("ram-scratch", "disk-scratch", "dev-shm-scratch").
+  string name = 1;
+  // Path inside the container where the volume should be mounted. Must be absolute and not contain ':'.
+  string mount_path = 2;
+  // Mounted read-only if true, read-write otherwise.
+  optional bool read_only = 3;
+  // Sub-path inside the volume from which the container's volume should be mounted. Defaults to "" (root).
+  string sub_path = 4;
+}
+
+// Represents a network port exposed by a container in a Pod.
+// Maps cleanly to Kubernetes corev1.ContainerPort.
+message ContainerPort {
+  enum Protocol {
+    PROTOCOL_UNSPECIFIED = 0;
+    TCP = 1;
+    UDP = 2;
+    SCTP = 3;
+  }
+  // Optional name for the port. Must be 1-15 characters, alphanumeric/hyphens.
+  string name = 1;
+  // Number of port to expose on the pod's IP address (1-65535).
+  int32 container_port = 2 [(google.api.field_behavior) = REQUIRED];
+  // Protocol for port. Must be UDP, TCP, or SCTP. Defaults to TCP if unspecified.
+  Protocol protocol = 3;
+  // Number of port to expose on the host (if host port forwarding is required).
+  int32 host_port = 4;
+}
+
+message ExecutableSpec {
+  // The resources required to run the executable.
+  ResourceSet resources = 1;
+  // The docker image to use for the executable.
+  string docker_image = 2;
+  // The arguments to pass to the executable.
+  // Deprecated: Use args_list instead, which supports ordered, verbatim, and positional arguments.
+  map<string, string> args = 3 [deprecated = true];
+  // The environment variables to set for the executable.
+  // Deprecated: Use env instead, which supports structured environment variables.
+  map<string, string> env_vars = 4 [deprecated = true];
+  // The command to run in the container (overwrites ENTRYPOINT).
+  repeated string command = 5;
+  // The structured environment variables, supporting downward API.
+  repeated EnvVar env = 6;
+  // Optional name for the container. If unset, defaults to the job name for the primary container,
+  // '<job_name>-sidecar-<index>' for sidecars, or '<job_name>-init-<index>' for init containers.
+  string name = 7;
+  // Ordered list of arguments passed verbatim to the container entrypoint/command without automatic flag prefixes.
+  // Can be used for positional arguments, bare key=value pairs (MaxText/Abseil), or GNU --flag=value options.
+  repeated string args_list = 8;
+  // Volume mounts to mount volumes into this container.
+  repeated VolumeMount volume_mounts = 9;
+  // List of ports exposed from the container.
+  repeated ContainerPort ports = 10;
+  // Whether to run the container in privileged mode (requires backend feature flag -allow_privileged_containers).
+  optional bool privileged = 11;
+  // Optional restart policy for init containers (e.g. "Always" to configure Kubernetes native sidecar containers).
+  optional string restart_policy = 12;
+}
+
+// SchedulingConstraints contains the scheduling constraints for the
+// executable. For now, this is just a Kueue queue name, but we leave this
+// extensible to other routing schemes in the future.
+message SchedulingConstraints {
+  // Queue to schedule the executable on.
+  string queue_name = 1;
+}

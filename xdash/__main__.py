@@ -1,4 +1,5 @@
-#!/bin/bash
+# Copyright 2026 Google LLC
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -10,18 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-#
-# Build distributions from the checked-in XMC client and generated protos.
+"""Main execution entrypoint for python -m xdash."""
 
-set -euo pipefail
+from xdash.cli import main
 
-SOURCE_ROOT_DIR="$(realpath "$(dirname "$0")/..")"
-cd "${SOURCE_ROOT_DIR}"
-
-PYTHON_CMD="${PYTHON_CMD:-python3}"
-VENV_DIR="$(mktemp -d)"
-trap 'rm -rf "${VENV_DIR}"' EXIT
-
-"${PYTHON_CMD}" -m venv "${VENV_DIR}"
-"${VENV_DIR}/bin/python" -m pip install --upgrade build
-"${VENV_DIR}/bin/python" -m build
+if __name__ == "__main__":
+    main()

@@ -33,8 +33,13 @@ setup(
     long_description=long_description,
     long_description_content_type='text/markdown',
     author='DeepMind Technologies Limited',
-    packages=find_namespace_packages(exclude=['examples.*']),
-    package_data={'': ['*.sh', '*.sql', '*.ini', '*.mako', 'py.typed']},
+    packages=find_namespace_packages(
+        exclude=['examples.*', 'build', 'build.*', 'dist', 'dist.*']
+    ),
+    package_data={
+        '': ['*.sh', '*.sql', '*.ini', '*.mako', '*.proto', 'py.typed'],
+        'xmanager_cloud': ['source.json'],
+    },
     python_requires='>=3.10',
     install_requires=[
         'absl-py',
@@ -50,12 +55,12 @@ setup(
         'google-auth',
         'google-cloud-aiplatform',
         'google-cloud-storage',
-        'googleapis-common-protos',
-        'grpcio',
+        'googleapis-common-protos>=1.75.3',
+        'grpcio>=1.78.0',
         'humanize',
         'immutabledict',
         'kubernetes',
-        'protobuf<7',
+        'protobuf>=6.31.1,<7',
         'psutil',
         'python-dotenv',
         'pyyaml',

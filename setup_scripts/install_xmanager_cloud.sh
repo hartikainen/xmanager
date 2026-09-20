@@ -43,7 +43,10 @@ copy_service_to_package() {
   if [ ! -d "${cmd_dir}" ] && [ -d "${XMC_DIR}/${service_name}" ]; then
     cmd_dir="${XMC_DIR}/${service_name}"
   fi
-  if [ -d "${cmd_dir}" ] && compgen -G "${cmd_dir}/*.py" > /dev/null; then
+  if [ "${service_name}" = "experiment_state_server" ] && \
+      [ -f "${dest_dir}/experiment_state_api.py" ]; then
+    echo "Preserving the XManager experiment client in ${dest_dir}..."
+  elif [ -d "${cmd_dir}" ] && compgen -G "${cmd_dir}/*.py" > /dev/null; then
     echo "Copying python files from ${cmd_dir}..."
     cp "${cmd_dir}"/*.py "${dest_dir}/"
     rm -f "${dest_dir}"/*_test.py
@@ -215,10 +218,10 @@ echo "Updating pip and installing dependencies..."
 pip install --index-url https://pypi.org/simple --upgrade pip
 pip install --index-url https://pypi.org/simple \
   grpcio \
-  "grpcio-tools" \
+  "grpcio-tools==1.78.0" \
   "protobuf<7" \
   google-auth \
-  googleapis-common-protos \
+  "googleapis-common-protos==1.75.3" \
   requests \
   python-dotenv \
   GitPython \
@@ -255,9 +258,26 @@ fi
 mkdir -p "${XMANAGER_SRC_DIR}/xmanager_cloud"
 touch "${XMANAGER_SRC_DIR}/xmanager_cloud/__init__.py"
 
-# 3. Clone Google APIs repository (required for proto compilation)
-echo "Cloning Google APIs repository..."
-git clone --depth 1 https://github.com/googleapis/googleapis.git "${GOOGLEAPIS_SRC_DIR}"
+# Use schemas from the pinned `googleapis-common-protos` distribution.
+python3 - "${GOOGLEAPIS_SRC_DIR}" <<'PY_PROTOS'
+from pathlib import Path
+import shutil
+import sys
+
+from google.api import annotations_pb2
+
+source_root = Path(annotations_pb2.__file__).parent.parent
+destination_root = Path(sys.argv[1]) / 'google'
+for source in source_root.rglob('*.proto'):
+  destination = destination_root / source.relative_to(source_root)
+  destination.parent.mkdir(parents=True, exist_ok=True)
+  shutil.copyfile(source, destination)
+shutil.copyfile(
+    destination_root / 'longrunning/operations_proto.proto',
+    destination_root / 'longrunning/operations.proto',
+)
+PY_PROTOS
+PROTOBUF_INCLUDE_DIR="$(python3 -c 'from pathlib import Path; import grpc_tools; print(Path(grpc_tools.__file__).parent / "_proto")')"
 
 # 4. Copy Protos, Python wrapper, and xdash SDK into XManager source
 echo "Copying xmc protos and source files..."
@@ -307,6 +327,7 @@ python3 -m grpc_tools.protoc \
   --proto_path="${XMANAGER_SRC_DIR}" \
   --proto_path="${XMC_DIR}" \
   --proto_path="${GOOGLEAPIS_SRC_DIR}" \
+  --proto_path="${PROTOBUF_INCLUDE_DIR}" \
   --python_out="${XMANAGER_SRC_DIR}" \
   --grpc_python_out="${XMANAGER_SRC_DIR}" \
   "${XMANAGER_SRC_DIR}"/xmanager_cloud/xid_service/proto/*.proto \
