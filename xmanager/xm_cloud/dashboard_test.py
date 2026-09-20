@@ -21,6 +21,9 @@ from xmanager.xm_cloud import dashboard
 
 os.environ['GIT_PYTHON_REFRESH'] = 'quiet'
 
+_CHART_ID = 'f47ac10b-58cc-4372-a567-0e02b2c3d479'
+_OTHER_CHART_ID = '10d38935-d2bf-4727-b887-26088bf05446'
+
 
 class DashboardTest(absltest.TestCase):
 
@@ -69,11 +72,10 @@ class DashboardTest(absltest.TestCase):
         experiment_id=123,
         plots=[plot],
     )
-    mock_dashboard_proto = mock.MagicMock()
-    mock_dashboard_proto.name = 'dashboards/456'
-    mock_dashboard_proto.title = 'Main Dashboard'
-    mock_dashboard_proto.charts = [chart.to_proto()]
-    self.mock_stub.CreateDashboard.return_value = mock_dashboard_proto
+    dashboard_proto = dashboard.dashboard_pb2.Dashboard(
+        name='dashboards/456', title='Main Dashboard'
+    )
+    self.mock_stub.CreateDashboard.return_value = dashboard_proto
 
     dash = dashboard.create_dashboard(
         title='Main Dashboard',
@@ -91,80 +93,115 @@ class DashboardTest(absltest.TestCase):
       dashboard.create_dashboard(title='Empty Dash', charts=[])
 
   def test_dashboard_update_and_no_delete(self):
-    mock_dashboard_proto = mock.MagicMock()
-    mock_dashboard_proto.name = 'dashboards/789'
-    mock_dashboard_proto.title = 'Old Title'
-    dash = dashboard.Dashboard(mock_dashboard_proto, stub=self.mock_stub)
+    dashboard_proto = dashboard.dashboard_pb2.Dashboard(
+        name='dashboards/789', title='Old Title'
+    )
+    response = dashboard.dashboard_pb2.Dashboard(
+        name='dashboards/789', title='Saved Title'
+    )
+    dash = dashboard.Dashboard(dashboard_proto, stub=self.mock_stub)
 
-    # Verify no delete attribute exists on Dashboard
     self.assertFalse(hasattr(dash, 'delete'))
     self.assertFalse(hasattr(dash, 'delete_dashboard'))
 
-    # Verify update calls UpdateDashboard on stub
-    self.mock_stub.UpdateDashboard.return_value = mock_dashboard_proto
-    dash.update(title='New Title')
+    self.mock_stub.UpdateDashboard.return_value = response
+    dash.update(title='Updated Title')
     self.mock_stub.UpdateDashboard.assert_called_once()
     request = self.mock_stub.UpdateDashboard.call_args[0][0]
     self.assertEqual(list(request.update_mask.paths), ['title'])
+    self.assertEqual(request.dashboard.name, 'dashboards/789')
+    self.assertEqual(request.dashboard.title, 'Updated Title')
+    self.assertEqual(dash.title, 'Saved Title')
 
+  @absltest.skipIf(
+      isinstance(dashboard.dashboard_pb2, dashboard._DummyProto),
+      'Dashboard protobufs are required to exercise field descriptors.',
+  )
   def test_dashboard_update_repeated_field(self):
-    plot = dashboard.create_plot(title='Plot 1')
-    chart1 = dashboard.create_chart(
-        title='Chart 1',
-        experiment_id=123,
-        plots=[plot],
+    dashboard_proto = dashboard.dashboard_pb2.Dashboard(
+        name='dashboards/789', chart_ids=[_CHART_ID]
     )
-    chart2 = dashboard.create_chart(
-        title='Chart 2',
-        experiment_id=456,
-        plots=[plot],
+    response = dashboard.dashboard_pb2.Dashboard(
+        name='dashboards/789', title='Saved Title', chart_ids=[_OTHER_CHART_ID]
     )
-    mock_dashboard_proto = mock.MagicMock()
-    mock_dashboard_proto.name = 'dashboards/789'
-    mock_dashboard_proto.title = 'Old Title'
-    mock_dashboard_proto.charts = [chart1.to_proto()]
-    dash = dashboard.Dashboard(mock_dashboard_proto, stub=self.mock_stub)
+    dash = dashboard.Dashboard(dashboard_proto, stub=self.mock_stub)
+    self.mock_stub.UpdateDashboard.return_value = response
 
-    self.mock_stub.UpdateDashboard.return_value = mock_dashboard_proto
-    dash.update(charts=[chart1, chart2])
+    dash.update(chart_ids=[_OTHER_CHART_ID])
+
+    self.mock_stub.UpdateDashboard.assert_called_once()
+    request = self.mock_stub.UpdateDashboard.call_args[0][0]
+    self.assertEqual(list(request.update_mask.paths), ['chart_ids'])
+    self.assertEqual(list(request.dashboard.chart_ids), [_OTHER_CHART_ID])
+    self.assertEqual(list(dashboard_proto.chart_ids), [_OTHER_CHART_ID])
+    self.assertEqual(dash.title, 'Saved Title')
+
+  def test_dashboard_update_repeated_field_without_descriptor(self):
+    proto_module = dashboard._DummyProto()
+    with mock.patch.object(dashboard, 'dashboard_pb2', proto_module):
+      plot = dashboard.create_plot(title='Plot')
+      chart = dashboard.create_chart(
+          title='Chart', experiment_id=123, plots=[plot]
+      )
+    dashboard_proto = proto_module.Dashboard(
+        name='dashboards/789', title='Title', charts=[]
+    )
+    dash = dashboard.Dashboard(dashboard_proto, stub=self.mock_stub)
+    self.mock_stub.UpdateDashboard.return_value = dashboard_proto
+
+    with mock.patch.object(dashboard, 'api_pb2', proto_module):
+      dash.update(charts=[chart])
+
     self.mock_stub.UpdateDashboard.assert_called_once()
     request = self.mock_stub.UpdateDashboard.call_args[0][0]
     self.assertEqual(list(request.update_mask.paths), ['charts'])
-    self.assertLen(mock_dashboard_proto.charts, 2)
+    self.assertEqual(request.dashboard.charts, [chart.to_proto()])
+    self.assertEqual(dash.charts[0].title, 'Chart')
 
   def test_dashboard_update_unknown_field_raises(self):
-    mock_dashboard_proto = mock.MagicMock()
-    dash = dashboard.Dashboard(mock_dashboard_proto, stub=self.mock_stub)
+    dashboard_proto = dashboard.dashboard_pb2.Dashboard()
+    dash = dashboard.Dashboard(dashboard_proto, stub=self.mock_stub)
     with self.assertRaises(ValueError):
       dash.update(invalid_field='foo')
+    self.mock_stub.UpdateDashboard.assert_not_called()
 
   def test_dashboard_update_repeated_field_non_iterable_raises(self):
-    mock_dashboard_proto = mock.MagicMock()
-    dash = dashboard.Dashboard(mock_dashboard_proto, stub=self.mock_stub)
+    dashboard_proto = dashboard._DummyProto().Dashboard()
+    dash = dashboard.Dashboard(dashboard_proto, stub=self.mock_stub)
     with self.assertRaises(TypeError):
       dash.update(charts=123)
+    self.mock_stub.UpdateDashboard.assert_not_called()
 
+  @absltest.skipIf(
+      isinstance(dashboard.dashboard_pb2, dashboard._DummyProto),
+      'Dashboard protobufs are required to exercise field descriptors.',
+  )
   def test_dashboard_update_with_descriptor(self):
-    mock_field_desc = mock.MagicMock()
-    mock_field_desc.label = 3
-    mock_field_desc.LABEL_REPEATED = 3
-    mock_dashboard_proto = mock.MagicMock()
-    mock_dashboard_proto.DESCRIPTOR.fields_by_name = {
-        'charts': mock_field_desc,
-        'title': mock.MagicMock(label=1, LABEL_REPEATED=3),
-    }
-    mock_dashboard_proto.charts = []
-    dash = dashboard.Dashboard(mock_dashboard_proto, stub=self.mock_stub)
+    dashboard_proto = dashboard.dashboard_pb2.Dashboard(name='dashboards/789')
+    dash = dashboard.Dashboard(dashboard_proto, stub=self.mock_stub)
+    self.mock_stub.UpdateDashboard.return_value = dashboard_proto
 
-    self.mock_stub.UpdateDashboard.return_value = mock_dashboard_proto
-    dash.update(title='New Title', charts=['chart_proto_1'])
+    dash.update(
+        title='Updated Title',
+        description='Dashboard description',
+        chart_ids=[_CHART_ID],
+    )
+
     self.mock_stub.UpdateDashboard.assert_called_once()
     request = self.mock_stub.UpdateDashboard.call_args[0][0]
-    self.assertEqual(list(request.update_mask.paths), ['title', 'charts'])
-    self.assertEqual(mock_dashboard_proto.charts, ['chart_proto_1'])
+    self.assertEqual(
+        list(request.update_mask.paths), ['title', 'description', 'chart_ids']
+    )
+    self.assertEqual(request.dashboard.title, 'Updated Title')
+    self.assertEqual(request.dashboard.description, 'Dashboard description')
+    self.assertEqual(list(request.dashboard.chart_ids), [_CHART_ID])
+    self.assertEqual(dash.title, 'Updated Title')
 
     with self.assertRaises(ValueError):
       dash.update(unknown='bad')
+    with self.assertRaises(TypeError):
+      dash.update(chart_ids=123)
+    self.mock_stub.UpdateDashboard.assert_called_once()
 
 
 class GetDashboardServiceStubTest(absltest.TestCase):

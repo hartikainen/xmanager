@@ -1,6 +1,6 @@
 """Dashboard, Chart, and Plot wrappers for XManager on Cloud."""
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Sequence
 import functools
 import os
 from typing import Any
@@ -177,14 +177,10 @@ class Dashboard:
         value = [v.to_proto() if hasattr(v, 'to_proto') else v for v in value]
 
       is_repeated = False
-      if isinstance(fields_by_name, Mapping):
+      if fields_by_name is not None:
         if key not in fields_by_name:
           raise ValueError(f'Unknown field {key!r} for Dashboard.')
-        field_desc = fields_by_name[key]
-        if getattr(field_desc, 'label', None) == getattr(
-            field_desc, 'LABEL_REPEATED', -1
-        ):
-          is_repeated = True
+        is_repeated = fields_by_name[key].is_repeated
       else:
         if key not in _VALID_DASHBOARD_FIELDS:
           raise ValueError(f'Unknown field {key!r} for Dashboard.')
