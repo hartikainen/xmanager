@@ -18,6 +18,8 @@ import functools
 import json
 import logging
 import os
+import threading
+import time
 from typing import Any, Callable
 
 import google.auth
@@ -40,6 +42,8 @@ from xmanager_cloud.experiment_state_server.proto import work_unit_pb2
 
 _XMANAGER_ENDPOINT = 'dns:///grpc.api.alpha.example.com'
 _CHANNEL_READY_TIMEOUT_SEC = 5.0
+_TOKEN_LIFETIME_SEC = 3600
+_TOKEN_REFRESH_MARGIN_SEC = 300
 
 
 def _get_xmanager_endpoint() -> str:
@@ -179,6 +183,51 @@ class BearerAuthInterceptor(grpc.UnaryUnaryClientInterceptor):
     )
 
 
+class IdentityTokenPlugin(grpc.AuthMetadataPlugin):
+  """Refreshes IAP identity tokens for gRPC call metadata."""
+
+  def __init__(self, credentials: Any, client_sa: str, audience: str):
+    self._credentials = credentials
+    self._client_sa = client_sa
+    self._audience = audience
+    self._token = None
+    self._replace_at = 0.0
+    # gRPC can request metadata from concurrent threads.
+    self._lock = threading.Lock()
+
+  def token(self) -> str:
+    """Returns a token that will still be valid when the server sees it."""
+    with self._lock:
+      now = time.monotonic()
+      if self._token is None or now >= self._replace_at:
+        self._token = self._mint()
+        self._replace_at = (
+            now + _TOKEN_LIFETIME_SEC - _TOKEN_REFRESH_MARGIN_SEC
+        )
+      return self._token
+
+  def _mint(self) -> str:
+    authed_session = google.auth.transport.requests.AuthorizedSession(
+        self._credentials
+    )
+    url = (
+        'https://iamcredentials.googleapis.com/v1/projects/-/'
+        f'serviceAccounts/{self._client_sa}:generateIdToken'
+    )
+    body = {'audience': self._audience, 'includeEmail': True}
+    response = authed_session.post(url, json=body)
+    response.raise_for_status()
+    return response.json()['token']
+
+  def __call__(self, context: Any, callback: Callable[..., Any]) -> None:
+    try:
+      token = self.token()
+    except Exception as e:  # pylint: disable=broad-except
+      callback(None, e)
+    else:
+      callback((('authorization', f'Bearer {token}'),), None)
+
+
 def _build_secure_channel(
     endpoint: str,
     auth_token: str | None,
@@ -212,23 +261,17 @@ def _build_secure_channel(
     client_sa = input('Enter XMC_CLIENT_SA: ')
 
   try:
-    credentials, _ = google.auth.default()
-    authed_session = google.auth.transport.requests.AuthorizedSession(
-        credentials
+    credentials, _ = google.auth.default(
+        scopes=['https://www.googleapis.com/auth/cloud-platform']
     )
-    url = (
-        'https://iamcredentials.googleapis.com/v1/projects/-/'
-        f'serviceAccounts/{client_sa}:generateIdToken'
-    )
-    body = {'audience': iap_client_id, 'includeEmail': True}
-    response = authed_session.post(url, json=body)
-    response.raise_for_status()
-    open_id_connect_token = response.json()['token']
+    token_plugin = IdentityTokenPlugin(credentials, client_sa, iap_client_id)
+    # Report credential errors before handing authentication to gRPC.
+    token_plugin.token()
   except Exception as e:
     raise RuntimeError('Failed to get identity token via google-auth') from e
 
   channel_creds = grpc.ssl_channel_credentials()
-  call_creds = grpc.access_token_call_credentials(open_id_connect_token)
+  call_creds = grpc.metadata_call_credentials(token_plugin)
   composite_creds = grpc.composite_channel_credentials(
       channel_creds, call_creds
   )

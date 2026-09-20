@@ -14,9 +14,12 @@
 """Unit tests for experiment_state_api module."""
 
 import base64
+from concurrent import futures
+import contextlib
 import json
 import logging
 import os
+import threading
 from typing import Any
 import unittest
 from unittest import mock
@@ -517,6 +520,189 @@ class InterceptorsTest(unittest.TestCase):
         ]
     )
     mock_continuation.assert_called_once_with('replaced_details', 'request')
+
+
+class IdentityTokenPluginTest(unittest.TestCase):
+
+  def setUp(self):
+    super().setUp()
+    self.patches = contextlib.ExitStack()
+    self.addCleanup(self.patches.close)
+    self.credentials = mock.sentinel.credentials
+    self.plugin = experiment_state_api.IdentityTokenPlugin(
+        self.credentials, 'sa@example.com', 'iap-client-id'
+    )
+    self.clock = self.patches.enter_context(
+        mock.patch.object(experiment_state_api.time, 'monotonic', return_value=0)
+    )
+    self.session_factory = self.patches.enter_context(
+        mock.patch.object(experiment_state_api.requests, 'AuthorizedSession')
+    )
+    self.session = self.session_factory.return_value
+    self.response = self.session.post.return_value
+    self.response.json.return_value = {'token': 'first-token'}
+
+  def test_mints_identity_token_with_audience_and_email(self):
+    self.assertEqual(self.plugin.token(), 'first-token')
+    self.session_factory.assert_called_once_with(self.credentials)
+    self.session.post.assert_called_once_with(
+        'https://iamcredentials.googleapis.com/v1/projects/-/'
+        'serviceAccounts/sa@example.com:generateIdToken',
+        json={'audience': 'iap-client-id', 'includeEmail': True},
+    )
+    self.response.raise_for_status.assert_called_once_with()
+
+  def test_reuses_token_until_refresh_margin(self):
+    refresh_at = (
+        experiment_state_api._TOKEN_LIFETIME_SEC
+        - experiment_state_api._TOKEN_REFRESH_MARGIN_SEC
+    )
+    self.assertEqual(self.plugin.token(), 'first-token')
+    self.clock.return_value = refresh_at - 1
+    self.assertEqual(self.plugin.token(), 'first-token')
+    self.session.post.assert_called_once()
+    self.clock.return_value = refresh_at
+    self.response.json.return_value = {'token': 'second-token'}
+    self.assertEqual(self.plugin.token(), 'second-token')
+    self.assertEqual(self.session.post.call_count, 2)
+
+  def test_mint_latency_does_not_extend_token_lifetime(self):
+    def slow_response():
+      self.clock.return_value += experiment_state_api._TOKEN_REFRESH_MARGIN_SEC
+      return {'token': 'first-token'}
+
+    self.response.json.side_effect = slow_response
+    self.plugin.token()
+    self.clock.return_value = (
+        experiment_state_api._TOKEN_LIFETIME_SEC
+        - experiment_state_api._TOKEN_REFRESH_MARGIN_SEC
+    )
+    self.plugin.token()
+    self.assertEqual(self.session.post.call_count, 2)
+
+  def test_callback_receives_authorization_metadata(self):
+    callback = mock.Mock()
+    self.plugin(mock.sentinel.context, callback)
+    callback.assert_called_once_with(
+        (('authorization', 'Bearer first-token'),), None
+    )
+
+  def test_failed_refresh_reports_error_and_retries(self):
+    self.plugin.token()
+    self.clock.return_value = experiment_state_api._TOKEN_LIFETIME_SEC
+    error = RuntimeError('IAM request failed')
+    self.response.raise_for_status.side_effect = error
+    callback = mock.Mock()
+    self.plugin(mock.sentinel.context, callback)
+    callback.assert_called_once_with(None, error)
+    self.response.raise_for_status.side_effect = None
+    self.response.json.return_value = {'token': 'second-token'}
+    self.assertEqual(self.plugin.token(), 'second-token')
+    self.assertEqual(self.session.post.call_count, 3)
+
+  def test_concurrent_callbacks_share_refreshed_token(self):
+    self.plugin.token()
+    self.clock.return_value = experiment_state_api._TOKEN_LIFETIME_SEC
+    self.response.json.return_value = {'token': 'second-token'}
+    start = threading.Barrier(4)
+
+    def request_metadata():
+      start.wait(timeout=5)
+      callback = mock.Mock()
+      self.plugin(mock.sentinel.context, callback)
+      callback.assert_called_once_with(
+          (('authorization', 'Bearer second-token'),), None
+      )
+
+    with futures.ThreadPoolExecutor(max_workers=4) as executor:
+      results = [executor.submit(request_metadata) for _ in range(4)]
+      for result in results:
+        result.result(timeout=5)
+    self.assertEqual(self.session.post.call_count, 2)
+
+
+class BuildSecureChannelTest(unittest.TestCase):
+
+  def setUp(self):
+    super().setUp()
+    self.patches = contextlib.ExitStack()
+    self.addCleanup(self.patches.close)
+    self.patches.enter_context(mock.patch.dict(os.environ, {
+        'IAP_CLIENT_ID': 'iap-client-id',
+        'XMC_CLIENT_SA': 'sa@example.com',
+    }, clear=True))
+    self.default = self.patches.enter_context(mock.patch.object(
+        google.auth, 'default', return_value=(mock.sentinel.credentials, None)
+    ))
+    self.session_factory = self.patches.enter_context(mock.patch.object(
+        experiment_state_api.requests, 'AuthorizedSession'
+    ))
+    self.response = self.session_factory.return_value.post.return_value
+    self.response.json.return_value = {'token': 'iap-token'}
+    self.secure_channel = self.patches.enter_context(
+        mock.patch.object(grpc, 'secure_channel')
+    )
+    self.intercept_channel = self.patches.enter_context(
+        mock.patch.object(grpc, 'intercept_channel')
+    )
+    self.metadata_credentials = self.patches.enter_context(
+        mock.patch.object(grpc, 'metadata_call_credentials')
+    )
+    self.access_credentials = self.patches.enter_context(
+        mock.patch.object(grpc, 'access_token_call_credentials')
+    )
+    self.composite_credentials = self.patches.enter_context(
+        mock.patch.object(grpc, 'composite_channel_credentials')
+    )
+
+  def test_iap_scopes_adc_and_installs_eagerly_minted_plugin(self):
+    experiment_state_api._build_secure_channel(
+        'api.example.com', None, 'user@example.com'
+    )
+    self.default.assert_called_once_with(
+        scopes=['https://www.googleapis.com/auth/cloud-platform']
+    )
+    self.session_factory.assert_called_once_with(mock.sentinel.credentials)
+    self.response.raise_for_status.assert_called_once()
+    self.metadata_credentials.assert_called_once()
+    plugin = self.metadata_credentials.call_args.args[0]
+    self.assertIsInstance(plugin, experiment_state_api.IdentityTokenPlugin)
+    self.assertEqual(plugin.token(), 'iap-token')
+    self.session_factory.return_value.post.assert_called_once()
+    self.access_credentials.assert_not_called()
+    self.assertIs(
+        self.composite_credentials.call_args.args[1],
+        self.metadata_credentials.return_value,
+    )
+    self.secure_channel.assert_called_once_with(
+        'api.example.com', self.composite_credentials.return_value
+    )
+
+  def test_failed_eager_mint_prevents_channel_creation(self):
+    error = RuntimeError('IAM request failed')
+    self.response.raise_for_status.side_effect = error
+    with self.assertRaisesRegex(
+        RuntimeError, 'Failed to get identity token via google-auth'
+    ) as raised:
+      experiment_state_api._build_secure_channel(
+          'api.example.com', None, 'user@example.com'
+      )
+    self.assertIs(raised.exception.__cause__, error)
+    self.secure_channel.assert_not_called()
+    self.metadata_credentials.assert_not_called()
+
+  def test_explicit_token_bypasses_iap_credentials(self):
+    experiment_state_api._build_secure_channel(
+        'api.example.com', 'explicit-token', 'user@example.com'
+    )
+    self.default.assert_not_called()
+    self.session_factory.assert_not_called()
+    self.metadata_credentials.assert_not_called()
+    self.access_credentials.assert_called_once_with('explicit-token')
+    self.assertIs(
+        self.composite_credentials.call_args.args[1],
+        self.access_credentials.return_value,
+    )
 
 
 class CreateStubTest(unittest.TestCase):
